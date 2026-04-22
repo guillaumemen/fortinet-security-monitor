@@ -1,0 +1,28 @@
+name: 🛡️ Fortinet Security Monitor (Gemini)
+
+on:
+  schedule:
+    - cron: '0 6 * * *'    # 8h CEST  (UTC+2 = UTC-2h)
+    - cron: '0 11 * * *'   # 13h CEST
+  workflow_dispatch:         # Bouton Run manual dans GitHub Actions
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Dépendances
+        run: pip install requests
+
+      - name: 🔍 Lancement monitor
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WEBHOOK_URL:    ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python monitor.py
