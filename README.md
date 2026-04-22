@@ -8,14 +8,8 @@ avec **Google Search Grounding** (résultats en temps réel).
 - **Google Search intégré** — résultats en temps réel
 - **Gemini 2.5 Flash** — modèle rapide et intelligent
 
-## ⚙️ Configuration (2 secrets GitHub)
+# ⚙️ Configuration (2 secrets GitHub)
 
-Settings → Secrets and variables → Actions → **New repository secret**
-
-| Nom du secret          | Où l'obtenir                                              |
-|------------------------|-----------------------------------------------------------|
-| `GEMINI_API_KEY`       | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
-| `DISCORD_WEBHOOK_URL`  | Discord → Paramètres du serveur → Intégrations → Webhooks |
 
 ## 🕐 Planning
 - **8h00 CEST** (6h UTC)
