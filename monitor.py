@@ -20,13 +20,17 @@ CONFIG = {
     "model":        "gemini-2.5-flash-preview-04-17",   # modèle gratuit avec grounding
     "seen_cache":   "seen_alerts.json",
     "watch_terms": [
-        "FortiGate exploit CVE 2025",
+        "FortiGate exploit CVE",
         "FortiClient vulnerability critical",
         "FortiOS zero-day attack",
         "Fortinet security patch urgent",
         "FortiGate breach IOC",
         "FortiSwitch RCE vulnerability",
         "SSL-VPN Fortinet compromise",
+        "FortiGate privilege escalation admin",
+        "FortiGate LDAP authentication bypass",
+        "ANSSI Fortinet vulnérabilité critique",
+        
     ],
     "system_prompt": (
         "Tu es un expert en cybersécurité réseau. "
