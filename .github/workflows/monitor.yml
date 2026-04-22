@@ -2,9 +2,12 @@ name: 🛡️ Fortinet Security Monitor (Gemini)
 
 on:
   schedule:
-    - cron: '0 6 * * *'    # 8h CEST  (UTC+2 = UTC-2h)
-    - cron: '0 11 * * *'   # 13h CEST
-  workflow_dispatch:         # Bouton Run manual dans GitHub Actions
+    - cron: '0 6 * * *'
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   monitor:
