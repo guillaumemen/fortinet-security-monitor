@@ -5,14 +5,6 @@ Surveille les CVE, exploits et IOC Fortinet — alertes dans Discord via GitHub 
 
 ## ⚙️ Configuration (à faire une seule fois)
 
-### 1. Ajouter les secrets GitHub
-Settings → Secrets and variables → Actions → **New repository secret**
-
-| Nom du secret          | Valeur                                      |
-|------------------------|---------------------------------------------|
-| `PERPLEXITY_API_KEY`   | Ta clé API Perplexity (`pplx-...`)          |
-| `DISCORD_WEBHOOK_URL`  | L'URL de ton webhook Discord                |
-
 ### 2. C'est tout !
 Le bot tourne automatiquement **à 8h et 13h CEST** tous les jours.
 Tu peux aussi le lancer manuellement : **Actions → Run workflow**.
