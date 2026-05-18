@@ -135,84 +135,156 @@ def send_discord(term, data):
     emoji  = SEVERITY_EMOJI.get(sev, "⚪")
     color  = SEVERITY_COLOR.get(sev, 0x808080)
     sources = "\n".join(data.get("sources", [])[:3]) or "Aucune source disponible"
+import requests
+import json
+import os
+import re
+from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 
-    payload = {"embeds": [{
-        "title":  f"{emoji}  Alerte Sécurité — {sev.upper()}",
-        "color":  color,
+# ── Config ───────────────────────────────────────────────────────────────────
+DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
+SEEN_FILE       = "seen_cves.json"
+PSIRT_URL       = "https://www.fortiguard.com/psirt"
+
+# Produits à surveiller (laisser vide [] pour tous les produits)
+WATCHED_PRODUCTS = ["FortiOS", "FortiManager", "FortiAnalyzer", "FortiGate",
+                    "FortiSwitch", "FortiProxy", "FortiAP"]
+
+# Sévérités à notifier (mettre [] pour toutes)
+MIN_SEVERITIES = ["Critical", "High", "Medium", "Low"]
+
+SEVERITY_EMOJI = {
+    "critical": "🔴",
+    "high":     "🟠",
+    "medium":   "🟡",
+    "low":      "🔵",
+}
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def load_seen() -> set:
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE) as f:
+            return set(json.load(f))
+    return set()
+
+def save_seen(seen: set):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen), f)
+
+def fetch_psirt_advisories() -> list[dict]:
+    """Scrape the FortiGuard PSIRT page and return a list of advisories."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; FortinetSecurityMonitor/2.0)"}
+    advisories = []
+    page = 1
+
+    while True:
+        params = {"page": page}
+        resp = requests.get(PSIRT_URL, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Each advisory is inside a <tr> or a block — adapt selector to real DOM
+        rows = soup.select("table tbody tr") or soup.select(".advisory-row")
+
+        if not rows:
+            # Fallback: parse raw text blocks from the page
+            break
+
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 4:
+                continue
+
+            fg_id    = cells[0].get_text(strip=True)  # FG-IR-XX-XXX
+            cve_text = cells[0].get_text()
+            cve_ids  = re.findall(r"CVE-\d{4}-\d+", cve_text)
+            products = [p.get_text(strip=True) for p in cells[2].find_all("a")] if len(cells) > 2 else []
+            date_str = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+            severity = cells[-1].get_text(strip=True).lower() if cells else "unknown"
+            title    = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+
+            advisories.append({
+                "fg_id":    fg_id,
+                "cve_ids":  cve_ids,
+                "title":    title,
+                "products": products,
+                "date":     date_str,
+                "severity": severity,
+                "url":      f"https://www.fortiguard.com/psirt/{fg_id}",
+            })
+
+        # Check if there's a "Next" page
+        next_btn = soup.select_one("a[aria-label='Next']") or soup.find("a", string=re.compile(r"Next", re.I))
+        if not next_btn:
+            break
+        page += 1
+        if page > 3:  # Limite à 3 pages (~45 CVE max par run)
+            break
+
+    return advisories
+
+def is_watched(advisory: dict) -> bool:
+    """Return True if the advisory concerns a watched product (or all if list empty)."""
+    if not WATCHED_PRODUCTS:
+        return True
+    for product in advisory["products"]:
+        for watched in WATCHED_PRODUCTS:
+            if watched.lower() in product.lower():
+                return True
+    return False
+
+def send_discord(advisory: dict):
+    emoji = SEVERITY_EMOJI.get(advisory["severity"], "⚪")
+    severity_label = advisory["severity"].upper()
+    cve_list = ", ".join(advisory["cve_ids"]) if advisory["cve_ids"] else "N/A"
+    products = ", ".join(advisory["products"][:5]) or "N/A"
+
+    embed = {
+        "title":       f"{emoji} [{severity_label}] {advisory['title']}",
+        "url":         advisory["url"],
+        "color":       {"critical": 0xFF0000, "high": 0xFF6600,
+                        "medium": 0xFFCC00, "low": 0x0099FF}.get(advisory["severity"], 0x999999),
         "fields": [
-            {"name": "🔎 Terme surveillé", "value": f"`{term}`",                "inline": True},
-            {"name": "⚡ Sévérité",        "value": f"{emoji} {sev.upper()}",   "inline": True},
-            {"name": "📋 Résumé",          "value": data.get("summary", "N/A"), "inline": False},
-            {"name": "🔗 Sources",         "value": sources,                    "inline": False},
+            {"name": "🆔 PSIRT ID",   "value": advisory["fg_id"],  "inline": True},
+            {"name": "📋 CVE",        "value": cve_list,            "inline": True},
+            {"name": "📅 Publié le",  "value": advisory["date"],    "inline": True},
+            {"name": "🖥️ Produits",  "value": products,            "inline": False},
         ],
-        "footer":    {"text": "Security Monitor • Google Gemini + Search Grounding"},
-        "timestamp": datetime.datetime.utcnow().isoformat(),
-    }]}
+        "footer": {"text": f"FortiGuard PSIRT • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"},
+    }
+    payload = {"embeds": [embed]}
+    r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+    r.raise_for_status()
 
-    try:
-        r = requests.post(CONFIG["webhook_url"], json=payload, timeout=10)
-        r.raise_for_status()
-        logger.info(f"  ✅ Discord [{sev.upper()}] : {term}")
-    except requests.RequestException as e:
-        logger.error(f"  ❌ Webhook Discord : {e}")
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    seen = load_seen()
+    advisories = fetch_psirt_advisories()
+    new_count = 0
 
-def send_discord_ok(total):
-    now = datetime.datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
-    payload = {"embeds": [{
-        "title":       "✅ Scan terminé — Aucune alerte",
-        "color":       0x2ECC71,
-        "description": f"**{total}** terme(s) analysé(s) — **0** alerte(s)\n_{now}_",
-        "footer":      {"text": "Security Monitor • Google Gemini + Search Grounding"},
-        "timestamp":   datetime.datetime.utcnow().isoformat(),
-    }]}
-    try:
-        requests.post(CONFIG["webhook_url"], json=payload, timeout=10)
-    except requests.RequestException:
-        pass
-
-# ── BOUCLE PRINCIPALE ─────────────────────────────────────────────────────────
-def run():
-    if not CONFIG["api_key"]:
-        logger.error("❌ GEMINI_API_KEY manquante.")
-        return
-    if not CONFIG["webhook_url"]:
-        logger.error("❌ WEBHOOK_URL manquante.")
-        return
-
-    cache   = load_cache(CONFIG["seen_cache"])
-    alerted = 0
-    terms   = CONFIG["watch_terms"]
-
-    logger.info(f"🚀 Démarrage — {len(terms)} terme(s) avec Gemini + Google Search")
-
-    for term in terms:
-        logger.info(f"🔍 {term}")
-        result = query_gemini(term)
-
-        if not result:
-            time.sleep(2)
+    for adv in advisories:
+        key = adv["fg_id"]
+        if key in seen:
             continue
-        if not result.get("found") or result.get("severity") == "none":
-            logger.info("  ↳ Rien de notable")
-            time.sleep(2)
+        if not is_watched(adv):
+            continue
+        if MIN_SEVERITIES and adv["severity"].capitalize() not in MIN_SEVERITIES:
             continue
 
-        aid = alert_id(term, result.get("summary", ""))
-        if not is_fresh(cache, aid):
-            logger.info("  ↳ Déjà alerté (cache 20h)")
-            time.sleep(2)
-            continue
+        send_discord(adv)
+        seen.add(key)
+        new_count += 1
+        print(f"✅ Notifié : {key} ({adv['severity']}) — {', '.join(adv['cve_ids'])}")
 
-        send_discord(term, result)
-        cache[aid] = datetime.datetime.utcnow().isoformat()
-        alerted += 1
-        time.sleep(4)   # Respecte le rate limit Gemini free (15 RPM)
+    save_seen(seen)
 
-    if alerted == 0:
-        send_discord_ok(len(terms))
-
-    save_cache(CONFIG["seen_cache"], cache)
-    logger.info(f"✔ Terminé — {alerted}/{len(terms)} alerte(s) envoyée(s)")
+    if new_count == 0:
+        # Envoie un message "tout va bien" uniquement si aucune nouvelle CVE
+        requests.post(DISCORD_WEBHOOK, json={
+            "content": f"✅ **Scan PSIRT OK** — Aucune nouvelle CVE détectée ({len(seen)} CVE suivis)"
+        }, timeout=10)
+        print("✅ Aucune nouvelle CVE.")
 
 if __name__ == "__main__":
-    run()
+    main()
