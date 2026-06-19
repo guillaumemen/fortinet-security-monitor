@@ -1,167 +1,47 @@
 #!/usr/bin/env python3
 """
-Perplexity Security Monitor Bot — version Google Gemini (GRATUIT)
-Surveille des termes de sécurité via Gemini 2.5 Flash + Google Search Grounding
-et alerte via webhook Discord.
+Fortinet PSIRT Monitor — via NVD API
+Recupere les CVE Fortinet depuis l'API NVD et alerte via webhook Discord.
 """
 
-import os, json, time, logging, hashlib, datetime, re, requests
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logger = logging.getLogger("security-monitor")
-
-CONFIG = {
-    "api_key":      os.getenv("GEMINI_API_KEY", ""),
-    "webhook_url":  os.getenv("WEBHOOK_URL", ""),
-    "model":        "gemini-2.5-flash-preview-04-17",   # modèle gratuit avec grounding
-    "seen_cache":   "seen_alerts.json",
-    "watch_terms": [
-        "FortiGate exploit CVE",
-        "FortiClient vulnerability critical",
-        "FortiOS zero-day attack",
-        "Fortinet security patch urgent",
-        "FortiGate breach IOC",
-        "FortiSwitch RCE vulnerability",
-        "SSL-VPN Fortinet compromise",
-        "FortiGate privilege escalation admin",
-        "FortiGate LDAP authentication bypass",
-        "ANSSI Fortinet vulnérabilité critique",
-        
-    ],
-    "system_prompt": (
-        "Tu es un expert en cybersécurité réseau. "
-        "Réponds UNIQUEMENT en JSON strict, sans aucun texte ou markdown autour. "
-        "Format attendu exactement : "
-        '{ "found": true ou false, '
-        '"severity": "critical" ou "high" ou "medium" ou "low" ou "none", '
-        '"summary": "résumé court en français en 2 phrases maximum", '
-        '"sources": ["url1", "url2"] }'
-    ),
-}
-
-SEVERITY_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "none": "⚪"}
-SEVERITY_COLOR = {"critical": 0xFF0000, "high": 0xFF8C00, "medium": 0xFFD700, "low": 0x4169E1}
-
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:generateContent?key={key}"
-)
-
-# ── CACHE ─────────────────────────────────────────────────────────────────────
-def load_cache(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_cache(path, cache):
-    with open(path, "w") as f:
-        json.dump(cache, f, indent=2)
-
-def alert_id(term, summary):
-    return hashlib.md5(f"{term}:{summary[:80]}".encode()).hexdigest()
-
-def is_fresh(cache, aid, ttl_hours=20):
-    if aid not in cache:
-        return True
-    ts = datetime.datetime.fromisoformat(cache[aid])
-    return (datetime.datetime.utcnow() - ts).total_seconds() > ttl_hours * 3600
-
-# ── API GEMINI + GOOGLE SEARCH GROUNDING ──────────────────────────────────────
-def query_gemini(term):
-    url = GEMINI_URL.format(model=CONFIG["model"], key=CONFIG["api_key"])
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": CONFIG["system_prompt"]}]
-        },
-        "contents": [{
-            "parts": [{"text": (
-                f'Recherche les actualités des dernières 48h sur : "{term}". '
-                "Y a-t-il de nouvelles vulnérabilités, CVE critiques, exploits actifs ou IOC publiés ? "
-                "Utilise Google Search pour vérifier. "
-                "Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour."
-            )}]
-        }],
-        "tools": [{"google_search": {}}],   # Google Search Grounding activé
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 512,
-        },
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        # Extraction du texte de la réponse
-        raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-        # Nettoyage si Gemini wrape quand même dans des backticks
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-
-        # Extraction des sources depuis groundingMetadata si disponibles
-        sources = []
-        grounding = data["candidates"][0].get("groundingMetadata", {})
-        for chunk in grounding.get("groundingChunks", []):
-            uri = chunk.get("web", {}).get("uri", "")
-            if uri:
-                sources.append(uri)
-
-        result = json.loads(raw)
-        # Merge des sources depuis le grounding si le modèle n'en a pas fourni
-        if not result.get("sources") and sources:
-            result["sources"] = sources[:3]
-
-        return result
-
-    except requests.RequestException as e:
-        logger.error(f"Erreur API Gemini pour '{term}': {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"  Réponse: {e.response.text[:300]}")
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Parsing impossible pour '{term}': {e}")
-    return None
-
-# ── DISCORD WEBHOOK ───────────────────────────────────────────────────────────
-def send_discord(term, data):
-    sev    = data.get("severity", "none")
-    emoji  = SEVERITY_EMOJI.get(sev, "⚪")
-    color  = SEVERITY_COLOR.get(sev, 0x808080)
-    sources = "\n".join(data.get("sources", [])[:3]) or "Aucune source disponible"
-import requests
-import json
 import os
+import json
 import re
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone
+import requests
+from datetime import datetime, timezone, timedelta
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
-SEEN_FILE       = "seen_cves.json"
-PSIRT_URL       = "https://www.fortiguard.com/psirt"
+SEEN_FILE = "seen_cves.json"
 
-# Produits à surveiller (laisser vide [] pour tous les produits)
-WATCHED_PRODUCTS = ["FortiOS", "FortiManager", "FortiAnalyzer", "FortiGate",
-                    "FortiSwitch", "FortiProxy", "FortiAP"]
+# API NVD (gratuite, pas de cle requise pour usage basique)
+NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
-# Sévérités à notifier (mettre [] pour toutes)
-MIN_SEVERITIES = ["Critical", "High", "Medium", "Low"]
+# Produits Fortinet a surveiller
+WATCHED_KEYWORDS = [
+    "FortiOS", "FortiGate", "FortiManager", "FortiAnalyzer",
+    "FortiSwitch", "FortiProxy", "FortiAP", "FortiClient",
+    "FortiWeb", "FortiMail", "FortiSIEM"
+]
+
+# Severites a notifier (mettre [] pour toutes)
+MIN_SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
 SEVERITY_EMOJI = {
-    "critical": "🔴",
-    "high":     "🟠",
-    "medium":   "🟡",
-    "low":      "🔵",
+    "CRITICAL": "\U0001f534",
+    "HIGH":     "\U0001f7e0",
+    "MEDIUM":   "\U0001f7e1",
+    "LOW":      "\U0001f535",
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+SEVERITY_COLOR = {
+    "CRITICAL": 0xFF0000,
+    "HIGH":     0xFF6600,
+    "MEDIUM":   0xFFCC00,
+    "LOW":      0x0099FF,
+}
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
 def load_seen() -> set:
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE) as f:
@@ -170,121 +50,203 @@ def load_seen() -> set:
 
 def save_seen(seen: set):
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+        json.dump(sorted(list(seen)), f, indent=2)
 
-def fetch_psirt_advisories() -> list[dict]:
-    """Scrape the FortiGuard PSIRT page and return a list of advisories."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; FortinetSecurityMonitor/2.0)"}
-    advisories = []
-    page = 1
+# ── NVD API ───────────────────────────────────────────────────────────────────
+def fetch_fortinet_cves(days_back: int = 3) -> list:
+    """
+    Recupere les CVE Fortinet publiees sur les N derniers jours via l'API NVD.
+    """
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days_back)
+    pub_start = start.strftime("%Y-%m-%dT%H:%M:%S.000")
+    pub_end   = now.strftime("%Y-%m-%dT%H:%M:%S.000")
 
-    while True:
-        params = {"page": page}
-        resp = requests.get(PSIRT_URL, params=params, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+    params = {
+        "keywordSearch": "fortinet",
+        "pubStartDate":  pub_start,
+        "pubEndDate":    pub_end,
+        "resultsPerPage": 100,
+    }
 
-        # Each advisory is inside a <tr> or a block — adapt selector to real DOM
-        rows = soup.select("table tbody tr") or soup.select(".advisory-row")
+    headers = {"User-Agent": "FortinetSecurityMonitor/3.0 (github-actions)"}
 
-        if not rows:
-            # Fallback: parse raw text blocks from the page
-            break
+    try:
+        r = requests.get(NVD_URL, params=params, headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        vulns = data.get("vulnerabilities", [])
+        print(f"[NVD] {len(vulns)} CVE(s) Fortinet trouvees sur les {days_back} derniers jours.")
+        return vulns
+    except requests.RequestException as e:
+        print(f"[ERREUR] Appel NVD echoue : {e}")
+        return []
 
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) < 4:
-                continue
+def parse_severity(cve_item: dict) -> tuple[str, float]:
+    """
+    Extrait la severite et le score CVSS depuis un item NVD.
+    Retourne (severity_label, score).
+    """
+    metrics = cve_item.get("cve", {}).get("metrics", {})
 
-            fg_id    = cells[0].get_text(strip=True)  # FG-IR-XX-XXX
-            cve_text = cells[0].get_text()
-            cve_ids  = re.findall(r"CVE-\d{4}-\d+", cve_text)
-            products = [p.get_text(strip=True) for p in cells[2].find_all("a")] if len(cells) > 2 else []
-            date_str = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-            severity = cells[-1].get_text(strip=True).lower() if cells else "unknown"
-            title    = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+    # Priorite CVSSv3.1 > v3.0 > v2
+    for key in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"]:
+        if key in metrics and metrics[key]:
+            m = metrics[key][0]
+            cvss_data = m.get("cvssData", {})
+            score = cvss_data.get("baseScore", 0.0)
+            if key.startswith("cvssMetricV3"):
+                severity = cvss_data.get("baseSeverity", "UNKNOWN").upper()
+            else:
+                # CVSSv2 : pas de label severity natif, on le calcule
+                if score >= 9.0:
+                    severity = "CRITICAL"
+                elif score >= 7.0:
+                    severity = "HIGH"
+                elif score >= 4.0:
+                    severity = "MEDIUM"
+                else:
+                    severity = "LOW"
+            return severity, score
 
-            advisories.append({
-                "fg_id":    fg_id,
-                "cve_ids":  cve_ids,
-                "title":    title,
-                "products": products,
-                "date":     date_str,
-                "severity": severity,
-                "url":      f"https://www.fortiguard.com/psirt/{fg_id}",
-            })
+    return "UNKNOWN", 0.0
 
-        # Check if there's a "Next" page
-        next_btn = soup.select_one("a[aria-label='Next']") or soup.find("a", string=re.compile(r"Next", re.I))
-        if not next_btn:
-            break
-        page += 1
-        if page > 3:  # Limite à 3 pages (~45 CVE max par run)
-            break
+def is_watched(cve_item: dict) -> bool:
+    """
+    Verifie si la CVE concerne un produit Fortinet surveille.
+    """
+    cve = cve_item.get("cve", {})
+    # Cherche dans les descriptions
+    descriptions = " ".join(
+        d.get("value", "") for d in cve.get("descriptions", [])
+    )
+    # Cherche dans les configurations CPE
+    cpe_text = ""
+    for node in cve.get("configurations", []):
+        for match in node.get("cpeMatch", []):
+            cpe_text += match.get("criteria", "") + " "
 
-    return advisories
+    full_text = (descriptions + " " + cpe_text).lower()
 
-def is_watched(advisory: dict) -> bool:
-    """Return True if the advisory concerns a watched product (or all if list empty)."""
-    if not WATCHED_PRODUCTS:
+    if not WATCHED_KEYWORDS:
         return True
-    for product in advisory["products"]:
-        for watched in WATCHED_PRODUCTS:
-            if watched.lower() in product.lower():
-                return True
-    return False
 
-def send_discord(advisory: dict):
-    emoji = SEVERITY_EMOJI.get(advisory["severity"], "⚪")
-    severity_label = advisory["severity"].upper()
-    cve_list = ", ".join(advisory["cve_ids"]) if advisory["cve_ids"] else "N/A"
-    products = ", ".join(advisory["products"][:5]) or "N/A"
+    return any(kw.lower() in full_text for kw in WATCHED_KEYWORDS)
+
+# ── Discord ───────────────────────────────────────────────────────────────────
+def send_discord(cve_item: dict):
+    cve = cve_item.get("cve", {})
+    cve_id = cve.get("id", "N/A")
+
+    # Description en anglais (fallback en)
+    descriptions = cve.get("descriptions", [])
+    desc = next(
+        (d["value"] for d in descriptions if d.get("lang") == "en"),
+        "Pas de description disponible."
+    )
+    desc = desc[:350] + "..." if len(desc) > 350 else desc
+
+    severity, score = parse_severity(cve_item)
+    emoji = SEVERITY_EMOJI.get(severity, "\u26aa")
+    color = SEVERITY_COLOR.get(severity, 0x808080)
+
+    # Date de publication
+    published = cve.get("published", "")[:10]
+    modified  = cve.get("lastModified", "")[:10]
+
+    # References
+    refs = cve.get("references", [])
+    refs_text = "\n".join(
+        f"- [{r.get('source', 'ref')}]({r.get('url', '')})"
+        for r in refs[:3]
+    ) or "Aucune reference."
+
+    # Produits affectes via CPE
+    cpe_products = set()
+    for node in cve.get("configurations", []):
+        for match in node.get("cpeMatch", []):
+            cpe = match.get("criteria", "")
+            parts = cpe.split(":")
+            if len(parts) >= 5:
+                product = parts[4].replace("_", " ").title()
+                cpe_products.add(product)
+    products_text = ", ".join(sorted(cpe_products)[:6]) or "N/A"
 
     embed = {
-        "title":       f"{emoji} [{severity_label}] {advisory['title']}",
-        "url":         advisory["url"],
-        "color":       {"critical": 0xFF0000, "high": 0xFF6600,
-                        "medium": 0xFFCC00, "low": 0x0099FF}.get(advisory["severity"], 0x999999),
+        "title": f"{emoji} [{severity}] {cve_id}",
+        "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+        "description": desc,
+        "color": color,
         "fields": [
-            {"name": "🆔 PSIRT ID",   "value": advisory["fg_id"],  "inline": True},
-            {"name": "📋 CVE",        "value": cve_list,            "inline": True},
-            {"name": "📅 Publié le",  "value": advisory["date"],    "inline": True},
-            {"name": "🖥️ Produits",  "value": products,            "inline": False},
+            {"name": "\U0001f4ca Score CVSS",    "value": str(score),     "inline": True},
+            {"name": "\U0001f4c5 Publie le",     "value": published,      "inline": True},
+            {"name": "\U0001f504 Mis a jour",    "value": modified,       "inline": True},
+            {"name": "\U0001f5a5\ufe0f Produits", "value": products_text, "inline": False},
+            {"name": "\U0001f517 References",    "value": refs_text,      "inline": False},
         ],
-        "footer": {"text": f"FortiGuard PSIRT • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"},
+        "footer": {
+            "text": f"NVD API • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        },
     }
+
     payload = {"embeds": [embed]}
     r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
     r.raise_for_status()
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     seen = load_seen()
-    advisories = fetch_psirt_advisories()
+    cves = fetch_fortinet_cves(days_back=3)
+
     new_count = 0
+    skipped   = 0
 
-    for adv in advisories:
-        key = adv["fg_id"]
-        if key in seen:
-            continue
-        if not is_watched(adv):
-            continue
-        if MIN_SEVERITIES and adv["severity"].capitalize() not in MIN_SEVERITIES:
+    for item in cves:
+        cve_id = item.get("cve", {}).get("id", "")
+        if not cve_id:
             continue
 
-        send_discord(adv)
-        seen.add(key)
-        new_count += 1
-        print(f"✅ Notifié : {key} ({adv['severity']}) — {', '.join(adv['cve_ids'])}")
+        # Deja notifie
+        if cve_id in seen:
+            skipped += 1
+            continue
+
+        # Filtre produit
+        if not is_watched(item):
+            print(f"[SKIP] {cve_id} — produit non surveille")
+            skipped += 1
+            continue
+
+        # Filtre severite
+        severity, score = parse_severity(item)
+        if MIN_SEVERITIES and severity not in MIN_SEVERITIES:
+            print(f"[SKIP] {cve_id} — severite '{severity}' ignoree")
+            skipped += 1
+            continue
+
+        # Envoi Discord
+        try:
+            send_discord(item)
+            seen.add(cve_id)
+            new_count += 1
+            print(f"[OK] Notifie : {cve_id} ({severity} — {score})")
+        except requests.RequestException as e:
+            print(f"[ERREUR] Discord pour {cve_id} : {e}")
 
     save_seen(seen)
 
+    print(f"\nResume : {new_count} nouvelle(s) CVE notifiee(s), {skipped} ignoree(s).")
+
+    # Message Discord de recap si aucune nouvelle CVE
     if new_count == 0:
-        # Envoie un message "tout va bien" uniquement si aucune nouvelle CVE
-        requests.post(DISCORD_WEBHOOK, json={
-            "content": f"✅ **Scan PSIRT OK** — Aucune nouvelle CVE détectée ({len(seen)} CVE suivis)"
-        }, timeout=10)
-        print("✅ Aucune nouvelle CVE.")
+        try:
+            requests.post(
+                DISCORD_WEBHOOK,
+                json={"content": f"\u2705 **Scan Fortinet OK** — Aucune nouvelle CVE sur les 3 derniers jours ({len(seen)} CVE suivies au total)"},
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            print(f"[ERREUR] Discord recap : {e}")
 
 if __name__ == "__main__":
     main()
